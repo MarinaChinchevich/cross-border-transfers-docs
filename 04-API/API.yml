@@ -432,7 +432,7 @@ components:
       required:
         - amount
         - currency_to
-        - beneficiary_id
+        - beneficiary
         - payment_purpose
         - fx_rate_lock_id
       properties:
@@ -445,14 +445,47 @@ components:
           type: string
           enum: [KZT, CNY]
           description: Валюта получателя
-        beneficiary_id:
-          type: string
-          format: uuid
-          description: Уникальный идентификатор бенефициара из справочника
+        beneficiary:
+          type: object
+          required:
+            - beneficiary_name
+            - account_number
+            - bic
+            - bank_name
+            - country
+          description: |
+            Реквизиты бенефициара. 
+            Если бенефициар с такими реквизитами уже существует у пользователя — 
+            используется существующий. Иначе создаётся новый автоматически.
+          properties:
+            beneficiary_name:
+              type: string
+              minLength: 1
+              maxLength: 255
+              description: Имя бенефициара (полное имя получателя)
+            account_number:
+              type: string
+              minLength: 10
+              maxLength: 100
+              description: Номер счёта или IBAN получателя
+            bic:
+              type: string
+              minLength: 8
+              maxLength: 11
+              description: BIC/SWIFT код банка получателя
+            bank_name:
+              type: string
+              maxLength: 255
+              description: Название банка получателя
+            country:
+              type: string
+              minLength: 2
+              maxLength: 2
+              description: Код страны банка получателя 
         payment_purpose:
-          type: string
-          maxLength: 255
-          description: Цель платежа
+              type: string
+              maxLength: 255
+              description: Цель платежа      
         fx_rate_lock_id:
           type: string
           format: uuid
