@@ -148,7 +148,7 @@ components:
         transfer_id:
           type: string
           format: uuid
-          description: Уникальный идентификатор перевода (
+          description: Уникальный идентификатор перевода 
         user_id:
           type: string
           format: uuid
@@ -201,7 +201,10 @@ components:
           description: Заполняется при event_type = sent_to_gateway, completed, failed
         gateway_transaction_id:
           type: string
-          description: Внешний ID транзакции 
+          description: |
+            Внешний ID транзакции в платёжной системе.
+            Значение берётся из spfs_transactions.spfs_id или cips_transactions.cips_id
+            в зависимости от поля connector_type 
         error_code:
           type: string
           description: Заполняется при event_type = failed 
