@@ -4,7 +4,7 @@ info:
   description: |
     API для управления трансграничными переводами денежных средств.
     Поддерживает операции создания перевода, просмотра истории,
-    фиксации курса валют
+    фиксации курса валют, а также обработку вебхуков от платёжных шлюзов (СПФС и CIPS)
   version: 1.0.0
 
 servers:
@@ -49,16 +49,38 @@ paths:
       responses:
         '201':
           description: Перевод успешно создан
+          headers:
+            Location:
+              description: URI созданного ресурса
+              schema:
+                type: string
+                format: uri
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransferResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: Некорректный формат счёта/IBAN/BIC
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: INVALID_BENEFICIARY
+                  message: Неверные реквизиты бенефициара
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: Отправитель не резидент РФ 
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NON_RESIDENT
+                  message: Сервис доступен только для резидентов РФ
         '409':
           description: Дублирующий запрос 
           content:
@@ -70,12 +92,20 @@ paths:
                   code: DUPLICATE_REQUEST
                   message: Запрос с таким Idempotency-Key уже обработан
         '422':
-          description: Превышен лимит или недостаточно средств
+          description: |
+            Превышен лимит, недопустимая валютная пара, 
+            сумма перевода меньше минимальной или недостаточно средств
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               examples:
+                AMOUNT_TOO_LOW:
+                  summary: Сумма перевода меньше минимальной
+                  value:
+                    error:
+                      code: AMOUNT_TOO_LOW
+                      message: Минимальная сумма перевода 1000 RUB
                 LIMIT_EXCEEDED:
                   summary: Превышен лимит
                   value:
@@ -89,12 +119,37 @@ paths:
                       code: INSUFFICIENT_FUNDS
                       message: Недостаточно средств на счете
                       hint: Пополните счет и повторите попытку
+                UNSUPPORTED_CURRENCY_PAIR:
+                  summary: Неподдерживаемая валютная пара
+                  value:
+                    error:
+                      code: UNSUPPORTED_CURRENCY_PAIR
+                      message: Переводы в выбранную валюту недоступны
                 FX_RATE_EXPIRED:
                   summary: Курс устарел
                   value:
                     error:
                       code: FX_RATE_EXPIRED
                       message: Срок действия курса истек
+        '503':
+          description: Внешний сервис недоступен (Банк-отправитель или Комплаенс-сервис)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                BANK_UNAVAILABLE:
+                  summary: Банк-отправитель недоступен
+                  value:
+                    error:
+                      code: BANK_UNAVAILABLE
+                      message: Банк временно недоступен, повторите попытку позже
+                COMPLIANCE_UNAVAILABLE:
+                  summary: Комплаенс-сервис недоступен
+                  value:
+                    error:
+                      code: COMPLIANCE_UNAVAILABLE
+                      message: Сервис проверки недоступен, повторите попытку позже  
 
     get:
       summary: Получение списка переводов
@@ -455,7 +510,7 @@ components:
             - country
           description: |
             Реквизиты бенефициара. 
-            Если бенефициар с такими реквизитами уже существует у пользователя — 
+            Если бенефициар с такими реквизитами уже существует у пользователя - 
             используется существующий. Иначе создаётся новый автоматически.
           properties:
             beneficiary_name:
@@ -490,6 +545,12 @@ components:
           type: string
           format: uuid
           description: Идентификатор зафиксированного курса валюты (получен через /fx/rates/lock)
+        webhook_url:
+          type: string
+          format: uri
+          description: URL для получения уведомлений от платёжного шлюза
+          maxLength: 2048
+          example: "https://api.bank.ru/webhooks/transfers/123e4567-e89b-12d3-a456-426614174000"
 
     TransferResponse:
       type: object
@@ -587,7 +648,7 @@ components:
                         description: Сообщение об ошибке
             refund_info:
               type: object
-              description: Информация о возврате средств (если применимо)
+              description: Информация о возврате средств 
               properties:
                 refund_id:
                   type: string
@@ -789,6 +850,12 @@ components:
                 - FX_RATE_EXPIRED
                 - CONFLICT
                 - INTERNAL_ERROR
+                - AMOUNT_TOO_LOW
+                - UNSUPPORTED_CURRENCY_PAIR
+                - NON_RESIDENT
+                - INVALID_BENEFICIARY
+                - COMPLIANCE_UNAVAILABLE
+                - BANK_UNAVAILABLE
             message:
               type: string
               description: Краткое описание ошибки
