@@ -19,6 +19,8 @@ tags:
     description: Операции с переводами
   - name: fx
     description: Операции с курсами валют
+  - name: webhooks
+    description: Вебхуки от платёжных шлюзов
   
 paths:
   /transfers:
@@ -469,6 +471,120 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /webhooks/spfs:
+    post:
+      summary: Вебхук от платёжной системы СПФС
+      description: Эндпоинт для получения уведомлений от платёжной системы СПФС об изменении статуса транзакции
+      tags:
+        - webhooks
+      operationId: webhookSpfs
+      security: []
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 подпись тела запроса
+        - name: X-Request-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Уникальный идентификатор запроса от шлюза 
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookSpfsRequest'
+      responses:
+        '202':
+          description: Запрос принят на обработку
+        '400':
+          description: Ошибка валидации тела запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Неверная подпись запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: INVALID_SIGNATURE
+                  message: Неверная подпись запроса
+        '404':
+          description: Перевод не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: TRANSFER_NOT_FOUND
+                  message: Перевод по указанному transaction_id не найден
+  /webhooks/cips:
+    post:
+      summary: Вебхук от платёжной системы CIPS
+      description: Эндпоинт для получения уведомлений от платёжной системы CIPS об изменении статуса транзакции
+      tags:
+        - webhooks
+      operationId: webhookCips
+      security: []
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+          description: HMAC-SHA256 подпись тела запроса
+        - name: X-Request-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Уникальный идентификатор запроса от шлюза 
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCipsRequest'
+      responses:
+        '202':
+          description: Запрос принят на обработку
+        '400':
+          description: Ошибка валидации тела запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Неверная подпись запроса
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: INVALID_SIGNATURE
+                  message: Неверная подпись запроса
+        '404':
+          description: Перевод не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: TRANSFER_NOT_FOUND
+                  message: Перевод по указанному transaction_id не найден              
 
 components:
   securitySchemes:
@@ -752,6 +868,13 @@ components:
           type: string
           enum: [KZT, CNY]
           description: Валюта получателя
+        country_to:
+          type: string
+          minLength: 2
+          maxLength: 2
+          description: |
+            Двухбуквенный код страны получателя.
+            Необходим для определения направления и корректного расчета комиссии
 
     FxRateLockResponse:
       type: object
@@ -823,6 +946,82 @@ components:
           type: string
           format: date-time
           description: Дата создания возврата
+
+    WebhookSpfsRequest:
+      type: object
+      required:
+        - transaction_id
+        - transfer_id
+        - status
+        - timestamp
+      properties:
+        transaction_id:
+          type: string
+          description: Внешний идентификатор транзакции в СПФС
+        transfer_id:
+          type: string
+          format: uuid
+          description: Идентификатор перевода в нашей системе
+        status:
+          type: string
+          enum: [COMPLETED, FAILED, REJECTED, PENDING]
+          description: Статус транзакции в платёжной системе
+        amount:
+          type: number
+          format: double
+          description: Сумма транзакции в валюте получателя
+        currency:
+          type: string
+          enum: [KZT]
+          description: Валюта транзакции
+        timestamp:
+          type: string
+          format: date-time
+          description: Время события в платёжной системе
+        error_code:
+          type: string
+          description: Код ошибки (заполняется при статусе FAILED/REJECTED)
+        error_message:
+          type: string
+          description: Сообщение об ошибке (заполняется при статусе FAILED/REJECTED)
+    
+    WebhookCipsRequest:
+      type: object
+      required:
+        - transaction_id
+        - transfer_id
+        - status
+        - timestamp
+      properties:
+        transaction_id:
+          type: string
+          description: Внешний идентификатор транзакции в CIPS
+        transfer_id:
+          type: string
+          format: uuid
+          description: Идентификатор перевода в нашей системе
+        status:
+          type: string
+          enum: [COMPLETED, FAILED, REJECTED, PENDING]
+          description: Статус транзакции в платёжной системе
+        amount:
+          type: number
+          format: double
+          description: Сумма транзакции в валюте получателя
+        currency:
+          type: string
+          enum: [CNY]
+          description: Валюта транзакции
+        timestamp:
+          type: string
+          format: date-time
+          description: Время события в платёжной системе
+        error_code:
+          type: string
+          description: Код ошибки (заполняется при статусе FAILED/REJECTED)
+        error_message:
+          type: string
+          description: Сообщение об ошибке (заполняется при статусе FAILED/REJECTED)      
 
     ErrorResponse:
       type: object
