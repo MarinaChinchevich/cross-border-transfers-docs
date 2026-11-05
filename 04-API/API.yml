@@ -13,6 +13,7 @@ servers:
 
 security:
   - bearerAuth: []
+  - ApiKeyAuth: []
 
 tags:
   - name: transfers
@@ -335,7 +336,7 @@ paths:
       summary: Инициация возврата средств
       description: |
         Принудительная инициация возврата средств по переводу.
-        Используется при ошибках шлюза, отклонении комплаенсом, истечении срока холда
+        Используется при ошибках шлюза, истечении срока холда
       tags:
         - transfers
       operationId: transferRefund
@@ -471,6 +472,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  
   /webhooks/spfs:
     post:
       summary: Вебхук от платёжной системы СПФС
@@ -595,6 +597,14 @@ components:
       description: |
         JWT токен, полученный от основной системы банка.
         Передавать только по HTTPS в заголовке Authorization: Bearer <token>
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Service-Key
+      description: |
+        Ключ авторизации внутреннего сервиса банка. 
+        Передается вместе с заголовком X-Service-Id. 
+        Используется для межсервисного взаимодействия      
 
   schemas:
     CreateTransferRequest:
@@ -606,6 +616,13 @@ components:
         - payment_purpose
         - fx_rate_lock_id
       properties:
+        user_id:
+          type: string
+          format: uuid
+          description: |
+            Идентификатор пользователя-отправителя. 
+            Обязателен, если запрос отправляется внутренним сервисом банка. 
+            Если запрос идет от мобильного приложения, поле игнорируется
         amount:
           type: number
           format: double
