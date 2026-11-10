@@ -17,12 +17,26 @@ channels:
     messages:
       TransferEventMessage:
         $ref: '#/components/messages/TransferEventMessage'
+  
+  transfer_events.DLQ:
+    address: transfer_events.DLQ
+    description: Очередь мертвых писем для необработанных операционных сбоев топика переводов 
+    messages:
+      TransferEventMessage:
+        $ref: '#/components/messages/TransferEventMessage'
 
   transfer_status_changed:
     address: transfer_status_changed
     description: |
       Топик для аудиторских событий изменения статуса перевода.
       Хранится 5 лет согласно требованиям ЦБ РФ и 152-ФЗ.
+    messages:
+      TransferStatusChangedMessage:
+        $ref: '#/components/messages/TransferStatusChangedMessage'
+
+  transfer_status_changed.DLQ:
+    address: transfer_status_changed.DLQ
+    description: Очередь мертвых писем для сбоев логов аудита статусов
     messages:
       TransferStatusChangedMessage:
         $ref: '#/components/messages/TransferStatusChangedMessage'
@@ -35,13 +49,20 @@ channels:
       RefundEventMessage:
         $ref: '#/components/messages/RefundEventMessage'
 
+  refund_events.DLQ:
+    address: refund_events.DLQ
+    description: Очередь мертвых писем для сбоев процессов компенсирующих возвратов
+    messages:
+      RefundEventMessage:
+        $ref: '#/components/messages/RefundEventMessage'
+
 operations:
   publishTransferEvent:
     action: send
     channel:
       $ref: '#/channels/transfer_events'
     summary: Публикация операционного события перевода
-    description: МС Переводов или МС Маршрутизации публикует событие при изменении состояния перевода
+    description: МС Переводов или МС Маршрутизации публикует событие при изменении состояния перевода через Outbox Worker
 
   consumeTransferEvent:
     action: receive
@@ -55,14 +76,14 @@ operations:
     channel:
       $ref: '#/channels/transfer_status_changed'
     summary: Публикация события изменения статуса
-    description: МС Переводов публикует событие при любом изменении статуса аудита и уведомлений
+    description: МС Переводов публикует событие при любом изменении статуса аудита и уведомлений через Outbox Worker
 
   consumeTransferStatusChanged:
     action: receive
     channel:
       $ref: '#/channels/transfer_status_changed'
     summary: Обработка события изменения статуса
-    description: МС Уведомлений отправляет Push-уведомление пользователю
+    description: МС Уведомлений принимает изменение статуса перевода отправляет Push-уведомление пользователю 
 
   publishRefundEvent:
     action: send
@@ -71,12 +92,46 @@ operations:
     summary: Публикация события возврата средств
     description: МС Возвратов публикует событие при инициации, завершении или ошибке возврата
 
+  consumeRefundEvent:
+    action: receive
+    channel:
+      $ref: '#/channels/refund_events'
+    summary: Изменение лимитов перевода при возврате
+    description: |
+      МС Переводов слушает событие refund.completed, чтобы перевести перевод в финальный статус REFUNDED и уменьшить счетчики daily_spent 
+      и monthly_spent в таблице лимитов, возвращая клиенту его доступный суточный баланс
+
+  consumeTransferEventsDLQ:
+    action: receive
+    channel:
+      $ref: '#/channels/transfer_events.DLQ'
+    summary: Ручной разбор сбоев в transfer_events (DLQ)
+    description: Дежурная служба поддержки вычитывает сообщения из DLQ при критических ошибках десериализации.
+
+  consumeTransferStatusChangedDLQ:
+    action: receive
+    channel:
+      $ref: '#/channels/transfer_status_changed.DLQ'
+    summary: Ручной разбор сбоев в логировании статусов (DLQ)
+
+  consumeRefundEventsDLQ:
+    action: receive
+    channel:
+      $ref: '#/channels/refund_events.DLQ'
+    summary: Ручной разбор сбоев в контуре возвратов (DLQ)
+
 components:
   messages:
     TransferEventMessage:
       name: TransferEventMessage
       title: Операционное событие перевода
       contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: Ключ партиционирования сообщений. Используется transfer_id перевода для соблюдения очередности сообщений
       headers:
         type: object
         required: [timestamp, message_id, idempotency_key]
@@ -100,6 +155,12 @@ components:
       name: TransferStatusChangedMessage
       title: Событие изменения статуса перевода 
       contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: Ключ партиционирования сообщений. Используется transfer_id перевода для соблюдения очередности сообщений
       headers:
         type: object
         required: [timestamp, message_id, idempotency_key]
@@ -120,6 +181,12 @@ components:
       name: RefundEventMessage
       title: Событие возврата средств
       contentType: application/json
+      bindings:
+        kafka:
+          key:
+            type: string
+            format: uuid
+            description: Ключ партиционирования сообщений. Используется transfer_id перевода для соблюдения очередности сообщений
       headers:
         type: object
         required: [timestamp, message_id, idempotency_key]
@@ -154,7 +221,7 @@ components:
           format: uuid
           description: Внешний ID отправителя 
         amount:
-          type: number
+          type: string
           description: Сумма перевода
         currency_from:
           type: string
@@ -165,13 +232,13 @@ components:
           enum: [KZT, CNY]
           description: Валюта получателя 
         exchange_rate:
-          type: number
+          type: string
           description: Зафиксированный курс
         commission:
-          type: number
+          type: string
           description: Комиссия за перевод
         total_amount:
-          type: number
+          type: string
           description: Итоговая сумма к списанию
         status:
           type: string
@@ -205,6 +272,9 @@ components:
             Внешний ID транзакции в платёжной системе.
             Значение берётся из spfs_transactions.spfs_id или cips_transactions.cips_id
             в зависимости от поля connector_type 
+        version:
+          type: integer
+          description: Номер версии записи перевода
         error_code:
           type: string
           description: Заполняется при event_type = failed 
@@ -231,14 +301,18 @@ components:
         old_status:
           type: string
           enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
-          description: Предыдущий статус
+          description: Предыдущий статус. Принимает null для самой первой записи PENDING
         new_status:
           type: string
           enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
           description: Новый статус
+        initiator:
+          type: string
+          enum: [USER, SYSTEM, COMPLIANCE_OFFICER, PAYMENT_GATEWAY]
+          description: Инициатор, совершивший изменение статуса перевода
         reason:
           type: string
-          description: Причина изменения статуса (из таблицы transfer_statuses)
+          description: Причина изменения статуса 
         changed_at:
           type: string
           format: date-time
@@ -265,7 +339,7 @@ components:
           format: uuid
           description: Внешний ID отправителя
         amount:
-          type: number
+          type: string
           description: Сумма возврата
         currency:
           type: string
