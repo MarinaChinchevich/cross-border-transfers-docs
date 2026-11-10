@@ -1,12 +1,13 @@
 @startuml
 
-title: Создание перевода 
+title: Создание перевода с учетом Transactional Outbox и Фиксации Курса
 
 actor "Отправитель" as User
 participant "Мобильное\nприложение" as App
 participant "API Gateway" as GW
 participant "МС Переводов" as Transfer
 database "БД Переводов" as DB
+participant "Outbox\nWorker" as OutboxWorker
 participant "МС Курса\nвалют (SSE)" as FX
 participant "Банк-\nотправитель" as Bank
 participant "МС Комплаенс" as AML
@@ -22,50 +23,54 @@ activate FX
 loop Обновление курса каждые 30 сек
     FX --> App : Обновление курса + пересчёт комиссии
 end
-
 deactivate FX
-
-User -> App : Вводит сумму, реквизиты бенефициара, цель платежа\nНажимает "Подтвердить"
+User -> App : Вводит сумму, реквизиты бенефициара, цель платежа
+App -> GW : POST /fx/rates/lock
+activate GW
+GW -> Transfer : Пересылает запрос фиксации курса
+activate Transfer
+Transfer -> DB : INSERT INTO fx_rate_history
+activate DB
+DB --> Transfer : OK (Запись фиксации курса)
+deactivate DB
+Transfer --> GW : 201 Created {fx_rate_lock_id, total_amount}
+GW --> App : Данные фиксации курса
+deactivate Transfer
+deactivate GW
+User -> App : Нажимает "Подтвердить"
 App -> GW : POST /transfers\n[Idempotency-Key]
 activate GW
-GW -> Transfer : Пересылает запрос
+GW -> Transfer : Пересылает запрос {fx_rate_lock_id, amount, beneficiary}
 activate Transfer
 
-Transfer -> DB : Проверка Idempotency-Key, лимита на переводы
+Transfer -> DB : Проверка Idempotency-Key, лимитов, валидности fx_rate_lock_id
 activate DB
-DB --> Transfer : ОК
+DB --> Transfer : ОК (Курс активен)
 deactivate DB
-
 Transfer -> Bank : Запрос на холдирование 
-activate Bank
-Bank --> Transfer : Холд подтверждён
-deactivate Bank
+    activate Bank
+    Bank --> Transfer : Холд подтверждён
+    deactivate Bank
 
-Transfer -> AML : Комплаенс-проверка 
-activate AML
-AML --> Transfer : risk_level = LOW
-deactivate AML
+    Transfer -> AML : Комплаенс-проверка 
+    activate AML
+    AML --> Transfer : risk_level = LOW
+    deactivate AML
 
-Transfer -> DB : INSERT INTO transfers, transfer_statuses
-activate DB
-DB --> Transfer : OK
-deactivate DB
+    Transfer -> DB : ACID Транзакция:\n- INSERT INTO transfers (status = APPROVED)\n- INSERT INTO transfer_statuses (new_status = APPROVED)\n- INSERT INTO outbox_transfers (event = 'transfer.created')
+    activate DB
+    DB --> Transfer : Транзакция успешна
+    deactivate DB
 
-Transfer -> Kafka : Публикация события transfer.created
-activate Kafka
-Kafka -->> Transfer : Подтверждение публикации
-deactivate Kafka
-
-Transfer --> GW : 201 Created {transfer_id, status, amount}
-GW --> App : Данные перевода
-App --> User : "Перевод создан"
-
+    Transfer --> GW : 201 Created {transfer_id, status: APPROVED}
+    GW --> App : Данные перевода
+    App --> User : "Перевод принят в обработку"
 alt Превышен лимит 
     Transfer -> DB : Проверка лимитов
     activate DB
     DB --> Transfer : Лимит исчерпан
     deactivate DB
-    Transfer --> GW : 403 LIMIT_EXCEEDED
+    Transfer --> GW : 422 LIMIT_EXCEEDED
     GW --> App : Ошибка лимита
     App --> User : "Превышен лимит на переводы"
 else Недостаточно средств 
@@ -73,31 +78,39 @@ else Недостаточно средств
     activate Bank
     Bank --> Transfer : Ошибка INSUFFICIENT_FUNDS
     deactivate Bank
-    Transfer --> GW : 402 INSUFFICIENT_FUNDS
+    Transfer --> GW : 422 INSUFFICIENT_FUNDS
     GW --> App : Ошибка
     App --> User : "Недостаточно средств"
 else risk_level = HIGH 
+    Transfer -> Bank : Запрос на холдирование 
+    activate Bank
+    Bank --> Transfer : Холд подтверждён
+    deactivate Bank
     Transfer -> AML : Комплаенс-проверка
     activate AML
     AML --> Transfer : risk_level = HIGH
     deactivate AML
-    Transfer -> Bank : Отмена холдирования
+    Transfer -> Bank : Отмена холдирования (Синхронный откат)
     activate Bank
     Bank --> Transfer : Холд отменён
     deactivate Bank
-    Transfer -> DB : INSERT INTO transfers (status = BLOCKED)
+    Transfer -> DB : Транзакция: INSERT INTO transfers (status = BLOCKED)
     activate DB
     DB --> Transfer : OK
     deactivate DB
     Transfer --> GW : 201 Created {status: BLOCKED}
     GW --> App : Перевод заблокирован
-    App --> User : "Перевод отклонён c указанием причины"
+    App --> User : "Перевод отклонён службой безопасности"
 else risk_level = MEDIUM 
+    Transfer -> Bank : Запрос на холдирование 
+    activate Bank
+    Bank --> Transfer : Холд подтверждён
+    deactivate Bank
     Transfer -> AML : Комплаенс-проверка
     activate AML
     AML --> Transfer : risk_level = MEDIUM
     deactivate AML
-    Transfer -> DB : INSERT INTO transfers (status = MANUAL_REVIEW)
+    Transfer -> DB : Транзакция: INSERT INTO transfers (status = MANUAL_REVIEW)
     activate DB
     DB --> Transfer : OK
     deactivate DB
@@ -105,8 +118,24 @@ else risk_level = MEDIUM
     GW --> App : Перевод на проверке
     App --> User : "Перевод на проверке до 24 часов"
 end
+
 deactivate Transfer
 deactivate GW
 deactivate App
+
+== Асинхронный цикл доставки событий (Transactional Outbox) ==
+loop Постоянный опрос (Polling) outbox-таблицы воркером
+    OutboxWorker -> DB : SELECT FROM outbox_transfers WHERE status = 'PENDING'
+    activate DB
+    activate OutboxWorker
+    DB --> OutboxWorker : Список событий
+    OutboxWorker -> Kafka : Публикация события transfer.created [Key: transfer_id]
+    activate Kafka
+    Kafka -->> OutboxWorker : Подтверждение (ACK) публикации
+    deactivate Kafka
+    OutboxWorker -> DB : UPDATE outbox_transfers SET status = 'PUBLISHED'
+    deactivate DB
+    deactivate OutboxWorker
+end
 
 @enduml

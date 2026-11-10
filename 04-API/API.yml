@@ -62,6 +62,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransferResponse'
+        '200':
+           description: Успешный повторный запрос. Возвращает ранее созданный перевод по ключу идемпотентности
+           content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferResponse'
         '400':
           description: Некорректный формат счёта/IBAN/BIC
           content:
@@ -85,15 +91,15 @@ paths:
                   code: NON_RESIDENT
                   message: Сервис доступен только для резидентов РФ
         '409':
-          description: Дублирующий запрос 
+          description: Конфликт идемпотентности. Тот же ключ применен к измененным параметрам тела запроса
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error:
-                  code: DUPLICATE_REQUEST
-                  message: Запрос с таким Idempotency-Key уже обработан
+                  code: CONFLICT
+                  message: Нельзя изменить параметры перевода
         '422':
           description: |
             Превышен лимит, недопустимая валютная пара, 
@@ -189,6 +195,7 @@ paths:
             type: integer
             minimum: 1
             default: 1
+          description: Порядковый номер запрашиваемой страницы выборки
         - name: limit
           in: query
           required: false
@@ -197,6 +204,7 @@ paths:
             minimum: 1
             maximum: 50
             default: 20
+          description: Количество элементов, отображаемых на одной странице
       responses:
         '200':
           description: Список переводов
@@ -204,6 +212,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransferListResponse'
+        '400':
+          description: Некорректные параметры фильтрации (ошибка формата даты или статуса)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -285,6 +299,12 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: If-Match
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Текущая версия записи перевода
         - name: transfer_id
           in: path
           required: true
@@ -320,26 +340,29 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-        '409':
-          description: Перевод нельзя отменить в текущем статусе
+        '412':
+          description: Несовпадение версий, перевод уже ушел в шлюз
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error:
-                  code: CONFLICT
-                  message: Перевод находится в статусе PROCESSING или COMPLETED
+                  code: PRECONDITION FAILED 
+                  message: Перевод уже отправлен и не может быть отменен
 
   /transfers/{transfer_id}/refund:
     post:
       summary: Инициация возврата средств
       description: |
         Принудительная инициация возврата средств по переводу.
-        Используется при ошибках шлюза, истечении срока холда
+        Используется при ошибках шлюза, истечении срока холда.
+        Доступно строго для внутренних сервисов банка
       tags:
         - transfers
       operationId: transferRefund
+      security:
+        - ApiKeyAuth: []
       parameters:
         - name: Idempotency-Key
           in: header
@@ -348,6 +371,13 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: X-Service-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Идентификатор вызывающего внутреннего микросервиса
         - name: transfer_id
           in: path
           required: true
@@ -394,15 +424,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /fx/rates/{currency_pair}:
+  /fx/rates/{currency_pair}/stream:
     get:
-      summary: Получение актуального курса валют
+      summary: Подписка на SSE-поток актуального курса валют
       description: |
-        Получение текущего курса валютной пары с учетом маржи.
-        Курс обновляется не чаще одного раза в 30 секунд
+        Устанавливает постоянное HTTP-соединение для трансляции обновлений курса в реальном времени
       tags:
         - fx
-      operationId: fxRateDetails
+      operationId: fxRateStream
       parameters:
         - name: currency_pair
           in: path
@@ -410,14 +439,14 @@ paths:
           schema:
             type: string
             enum: [RUB/KZT, RUB/CNY]
-          description: Валютная пара 
+          description: Валютная пара для подписки
       responses:
         '200':
-          description: Актуальный курс валют
+          description: Успешное установление SSE-соединения. Возвращает непрерывный поток событий
           content:
-            application/json:
+            text/event-stream:
               schema:
-                $ref: '#/components/schemas/FxRateResponse'
+                $ref: '#/components/schemas/FxRateStreamMessage'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -503,7 +532,7 @@ paths:
               $ref: '#/components/schemas/WebhookSpfsRequest'
       responses:
         '202':
-          description: Запрос принят на обработку
+          description: Запрос принят на обработку. Повторные вызовы возвращают такой же ответ
         '400':
           description: Ошибка валидации тела запроса
           content:
@@ -530,6 +559,20 @@ paths:
                 error:
                   code: TRANSFER_NOT_FOUND
                   message: Перевод по указанному transaction_id не найден
+        '409':
+           description: |
+            Конфликт бизнес-логики. Недопустимый переход статуса 
+            (например, шлюз прислал COMPLETED для перевода, который уже был отменен или возвращен). 
+            Инициирует инцидент безопасности и ручной разбор поддержкой
+           content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: CONFLICT
+                  message: Недопустимый перевод статуса транзакции из текущего состояния
+
   /webhooks/cips:
     post:
       summary: Вебхук от платёжной системы CIPS
@@ -560,7 +603,7 @@ paths:
               $ref: '#/components/schemas/WebhookCipsRequest'
       responses:
         '202':
-          description: Запрос принят на обработку
+          description: Запрос принят на обработку. Повторные вызовы возвращают такой же ответ
         '400':
           description: Ошибка валидации тела запроса
           content:
@@ -586,7 +629,20 @@ paths:
               example:
                 error:
                   code: TRANSFER_NOT_FOUND
-                  message: Перевод по указанному transaction_id не найден              
+                  message: Перевод по указанному transaction_id не найден 
+        '409':
+           description: |
+            Конфликт бизнес-логики. Недопустимый переход статуса 
+            (например, шлюз прислал COMPLETED для перевода, который уже был отменен или возвращен). 
+            Инициирует инцидент безопасности и ручной разбор поддержкой
+           content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: CONFLICT
+                  message: Недопустимый перевод статуса транзакции из текущего состояния             
 
 components:
   securitySchemes:
@@ -624,10 +680,11 @@ components:
             Обязателен, если запрос отправляется внутренним сервисом банка. 
             Если запрос идет от мобильного приложения, поле игнорируется
         amount:
-          type: number
-          format: double
-          minimum: 1000
-          description: Сумма перевода в валюте отправителя (RUB)
+          type: string
+          description: |
+            Сумма перевода в валюте отправителя (RUB). 
+            Минимальное допустимое значение для проведения операции: "1000.00".
+            Максимальное допустимое значение за одну операцию: "100000.00"
         currency_to:
           type: string
           enum: [KZT, CNY]
@@ -677,13 +734,7 @@ components:
           type: string
           format: uuid
           description: Идентификатор зафиксированного курса валюты (получен через /fx/rates/lock)
-        webhook_url:
-          type: string
-          format: uri
-          description: URL для получения уведомлений от платёжного шлюза
-          maxLength: 2048
-          example: "https://api.bank.ru/webhooks/transfers/123e4567-e89b-12d3-a456-426614174000"
-
+        
     TransferResponse:
       type: object
       properties:
@@ -696,8 +747,7 @@ components:
           format: uuid
           description: Внешний идентификатор отправителя (из JWT-токена)
         amount:
-          type: number
-          format: double
+          type: string
           description: Сумма перевода
         currency_from:
           type: string
@@ -708,16 +758,13 @@ components:
           enum: [KZT, CNY]
           description: Валюта получателя
         exchange_rate:
-          type: number
-          format: double
+          type: string
           description: Зафиксированный курс валюты
         commission:
-          type: number
-          format: double
+          type: string
           description: Комиссия за перевод
         total_amount:
-          type: number
-          format: double
+          type: string
           description: Итоговая сумма к списанию 
         status:
           type: string
@@ -745,6 +792,9 @@ components:
           type: string
           format: date-time
           description: Дата создания перевода
+        version:
+          type: integer
+          description: Текущая версия записи перевода
 
     TransferDetailResponse:
       allOf:
@@ -847,8 +897,12 @@ components:
                 type: string
                 format: date-time
                 description: Дата и время изменения статуса
+              initiator:
+                type: string
+                enum: [USER, SYSTEM, COMPLIANCE_OFFICER, PAYMENT_GATEWAY]
+                description: Инициатор, совершивший изменение статуса перевода
 
-    FxRateResponse:
+    FxRateStreamMessage:
       type: object
       properties:
         currency_pair:
@@ -856,10 +910,10 @@ components:
           enum: [RUB/KZT, RUB/CNY]
           description: Валютная пара
         rate:
-          type: number
+          type: string
           description: Базовый курс ЦБ РФ
         effective_rate:
-          type: number
+          type: string
           description: Курс с маржей 
         updated_at:
           type: string
@@ -877,10 +931,11 @@ components:
         - currency_to
       properties:
         amount:
-          type: number
-          format: double
-          minimum: 1000
-          description: Сумма перевода для расчёта комиссии
+          type: string
+          description: |
+           Сумма перевода для расчёта комиссии. 
+           Минимальное допустимое значение для проведения операции: "1000.00".
+           Максимальное допустимое значение за одну операцию: "100000.00"
         currency_to:
           type: string
           enum: [KZT, CNY]
@@ -904,16 +959,16 @@ components:
           type: string
           description: Валютная пара
         exchange_rate:
-          type: number
+          type: string
           description: Зафиксированный базовый курс
         effective_rate:
-          type: number
+          type: string
           description: Зафиксированный курс с маржей
         commission:
-          type: number
+          type: string
           description: Рассчитанная комиссия
         total_amount:
-          type: number
+          type: string
           description: Итоговая сумма к списанию
         locked_at:
           type: string
@@ -922,7 +977,7 @@ components:
         expires_at:
           type: string
           format: date-time
-          description: Время истечения фиксации курса (15 минут)
+          description: Время истечения фиксации курса 
 
     RefundResponse:
       type: object
@@ -936,7 +991,7 @@ components:
           format: uuid
           description: Уникальный идентификатор перевода
         amount:
-          type: number
+          type: string
           description: Сумма возврата
         currency:
           type: string
@@ -984,8 +1039,7 @@ components:
           enum: [COMPLETED, FAILED, REJECTED, PENDING]
           description: Статус транзакции в платёжной системе
         amount:
-          type: number
-          format: double
+          type: string
           description: Сумма транзакции в валюте получателя
         currency:
           type: string
@@ -1022,8 +1076,7 @@ components:
           enum: [COMPLETED, FAILED, REJECTED, PENDING]
           description: Статус транзакции в платёжной системе
         amount:
-          type: number
-          format: double
+          type: string
           description: Сумма транзакции в валюте получателя
         currency:
           type: string
