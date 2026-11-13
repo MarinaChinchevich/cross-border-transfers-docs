@@ -1,6 +1,6 @@
 @startuml
 
-title: Создание перевода с учетом Transactional Outbox и Фиксации Курса
+title: Создание перевода 
 
 actor "Отправитель" as User
 participant "Мобильное\nприложение" as App
@@ -46,7 +46,10 @@ activate Transfer
 Transfer -> DB : Проверка Idempotency-Key, лимитов, валидности fx_rate_lock_id
 activate DB
 DB --> Transfer : ОК (Курс активен)
+Transfer -> DB : Транзакция:\n- INSERT INTO transfers (status = PENDING, version = 1)\n- INSERT INTO transfer_statuses (old_status = NULL, new_status = PENDING)
+DB --> Transfer : OK (transfer_id создан)
 deactivate DB
+
 Transfer -> Bank : Запрос на холдирование 
     activate Bank
     Bank --> Transfer : Холд подтверждён
@@ -65,14 +68,14 @@ Transfer -> Bank : Запрос на холдирование
     Transfer --> GW : 201 Created {transfer_id, status: APPROVED}
     GW --> App : Данные перевода
     App --> User : "Перевод принят в обработку"
-alt Превышен лимит 
+alt Превышен лимит или истёк курс
     Transfer -> DB : Проверка лимитов
     activate DB
     DB --> Transfer : Лимит исчерпан
     deactivate DB
-    Transfer --> GW : 422 LIMIT_EXCEEDED
-    GW --> App : Ошибка лимита
-    App --> User : "Превышен лимит на переводы"
+    Transfer --> GW : 422 LIMIT_EXCEEDED/FX_RATE_EXPIRED
+    GW --> App : Ошибка валидации
+    App --> User : "Сообщение об ошибке"
 else Недостаточно средств 
     Transfer -> Bank : Запрос на холдирование
     activate Bank
@@ -90,11 +93,11 @@ else risk_level = HIGH
     activate AML
     AML --> Transfer : risk_level = HIGH
     deactivate AML
-    Transfer -> Bank : Отмена холдирования (Синхронный откат)
+    Transfer -> Bank : Отмена холдирования 
     activate Bank
     Bank --> Transfer : Холд отменён
     deactivate Bank
-    Transfer -> DB : Транзакция: INSERT INTO transfers (status = BLOCKED)
+    Transfer -> DB : Транзакция: INSERT INTO transfers (status = BLOCKED version = 2)
     activate DB
     DB --> Transfer : OK
     deactivate DB
@@ -110,7 +113,7 @@ else risk_level = MEDIUM
     activate AML
     AML --> Transfer : risk_level = MEDIUM
     deactivate AML
-    Transfer -> DB : Транзакция: INSERT INTO transfers (status = MANUAL_REVIEW)
+    Transfer -> DB : Транзакция: INSERT INTO transfers (status = MANUAL_REVIEW version = 2)
     activate DB
     DB --> Transfer : OK
     deactivate DB

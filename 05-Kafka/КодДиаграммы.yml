@@ -10,6 +10,7 @@ participant  "Outbox\nWorker Переводов" as OutboxTransfer
 database     "БД Переводов" as DB
 participant  "МС Переводов" as Transfer
 participant  "МС Возвратов" as Refund
+database     "БД Возвратов" as RefundDB
 participant  "Банк-\nотправитель" as Bank
 participant  "МС Уведомлений" as Notify
 actor        "Отправитель" as User
@@ -28,7 +29,7 @@ deactivate RoutingDB
 
 Routing -> Gateway : POST /transfers
 activate Gateway
-Gateway --> Routing : 200 OK {transaction_id}
+Gateway --> Routing : 202 OK {transaction_id}
 deactivate Gateway
 
 Routing -> RoutingDB : UPDATE routing_attempts (status = SUCCESS)
@@ -51,7 +52,7 @@ deactivate OutboxRouting
 
 Kafka ->> Transfer : Событие transfer.sent_to_gateway
 activate Transfer
-Transfer -> DB : UPDATE transfers (status = PROCESSING)
+Transfer -> DB : UPDATE transfers (status = PROCESSING version = 3)
 activate DB
 DB --> Transfer : OK
 deactivate DB
@@ -74,7 +75,7 @@ OutboxRouting -> RoutingDB : SELECT FROM outbox_routing WHERE status = 'PENDING'
 activate RoutingDB
 RoutingDB --> OutboxRouting : Лог 'transfer.completed'
 deactivate RoutingDB
-OutboxRouting ->> Kafka : Публикация transfer.completed\n{transfer_id, gateway_transaction_id}
+OutboxRouting ->> Kafka : Публикация события transfer.completed\n{transfer_id, gateway_transaction_id}
 activate Kafka
 Kafka -->> OutboxRouting : Подтверждение
 deactivate Kafka
@@ -148,14 +149,13 @@ alt [Шлюз недоступен или отклонил перевод]
     OutboxRouting -> RoutingDB : SELECT FROM outbox_routing WHERE status = 'PENDING'
     activate RoutingDB
     RoutingDB --> OutboxRouting : Лог 'transfer.failed'
-    deactivate RoutingDB
-    OutboxRouting ->> Kafka : Публикация transfer.failed
+    OutboxRouting ->> Kafka : Публикация события transfer.failed
     activate Kafka
     Kafka -->> OutboxRouting : Подтверждение
     deactivate Kafka
     OutboxRouting -> RoutingDB : UPDATE outbox_routing SET status = 'PUBLISHED'
     deactivate OutboxRouting
-
+    deactivate RoutingDB
     Kafka ->> Transfer : Событие transfer.failed
     activate Transfer
     Transfer -> DB : UPDATE transfers (status = FAILED)\nINSERT transfer_statuses
@@ -163,14 +163,35 @@ alt [Шлюз недоступен или отклонил перевод]
     DB --> Transfer : OK
     deactivate DB
 
-    Transfer -> Refund : Запуск процедуры возврата денег
-    activate Refund
-    Refund -> Bank : Запрос на отмену холдирования
-    activate Bank
-    Bank --> Refund : Холд отменён
-    deactivate Bank
-    deactivate Refund
+    Kafka ->> Refund : Событие transfer.failed
+        activate Refund
+        Refund -> RefundDB : INSERT INTO refunds (status = PROCESSING)
+        activate RefundDB
+        RefundDB --> Refund : OK
+        deactivate RefundDB
 
+        Refund -> Bank : Запрос на отмену холдирования
+        activate Bank
+        Bank --> Refund : Холд отменён
+        deactivate Bank
+
+        Refund -> RefundDB : Транзакция:\n- UPDATE refunds (status = COMPLETED)\n- INSERT INTO outbox_refunds ('refund.completed')
+        activate RefundDB
+        RefundDB --> Refund : OK
+        deactivate RefundDB
+        deactivate Refund
+
+        activate OutboxRefund
+        OutboxRefund -> RefundDB : SELECT FROM outbox_refunds WHERE status = 'PENDING'
+        activate RefundDB
+        RefundDB --> OutboxRefund : Событие 'refund.completed'
+        OutboxRefund ->> Kafka : Публикация в refund_events ('refund.completed')
+        activate Kafka
+        Kafka -->> OutboxRefund : ACK
+        deactivate Kafka
+        OutboxRefund -> RefundDB : UPDATE outbox_refunds SET status = 'PUBLISHED'
+        deactivate OutboxRefund
+        deactivate RefundDB
     Transfer -> DB : UPDATE transfers (status = REFUNDED)\n+ INSERT INTO outbox_transfers ('transfer.status_changed')
     activate DB
     DB --> Transfer : OK
@@ -181,14 +202,13 @@ alt [Шлюз недоступен или отклонил перевод]
     OutboxTransfer -> DB : SELECT FROM outbox_transfers WHERE status = 'PENDING'
     activate DB
     DB --> OutboxTransfer : Лог 'transfer.status_changed'
-    deactivate DB
     OutboxTransfer ->> Kafka : Публикация transfer.status_changed
     activate Kafka
     Kafka -->> OutboxTransfer : Подтверждение
     deactivate Kafka
     OutboxTransfer -> DB : UPDATE outbox_transfers SET status = 'PUBLISHED'
     deactivate OutboxTransfer
-
+    deactivate DB
     Kafka ->> Notify : Событие transfer.status_changed
     activate Notify
     Notify --> User : Push: "Перевод не удался, средства возвращены"

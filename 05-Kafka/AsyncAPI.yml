@@ -242,7 +242,7 @@ components:
           description: Итоговая сумма к списанию
         status:
           type: string
-          enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
+          enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED, CANCELLED]
           description: Текущий статус перевода
         country_to:
           type: string
@@ -304,7 +304,7 @@ components:
           description: Предыдущий статус. Принимает null для самой первой записи PENDING
         new_status:
           type: string
-          enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
+          enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED, CANCELLED]
           description: Новый статус
         initiator:
           type: string

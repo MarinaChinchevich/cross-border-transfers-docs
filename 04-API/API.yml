@@ -172,7 +172,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
+            enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED, CANCELLED]
           description: Фильтр по статусу перевода
         - name: date_from
           in: query
@@ -768,7 +768,7 @@ components:
           description: Итоговая сумма к списанию 
         status:
           type: string
-          enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
+          enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED, CANCELLED]
           description: Текущий статус перевода
         country_to:
           type: string
@@ -888,7 +888,7 @@ components:
                 description: Предыдущий статус перевода
               new_status:
                 type: string
-                enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED]
+                enum: [PENDING, APPROVED, PROCESSING, COMPLETED, BLOCKED, REJECTED, FAILED, MANUAL_REVIEW, REFUNDED, CANCELLED]
                 description: Новый статус перевода
               reason:
                 type: string
